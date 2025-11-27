@@ -569,15 +569,15 @@ class WanAudioRunner(WanRunner):  # type:ignore
 
         # frist_img and prev_video are mutually exclusive, prioritize using frist_img
         last_frames = None
-        if frist_img is not None:
+        if prev_video is not None:  # prioritize prev_video
+            last_frames = prev_video[:, :, -prev_frame_length:].clone().to(device)
+            frame_slice = slice(0, prev_frame_length)
+            prev_len = (prev_frame_length - 1) // 4 + 1
+        elif frist_img is not None:
             frist_frame = frist_img.to(device)
             last_frames = rearrange(frist_frame, "1 C H W -> 1 C 1 H W")
             frame_slice = slice(0, 1)
             prev_len = 1
-        elif prev_video is not None:
-            last_frames = prev_video[:, :, -prev_frame_length:].clone().to(device)
-            frame_slice = slice(0, prev_frame_length)
-            prev_len = (prev_frame_length - 1) // 4 + 1
         else:
             prev_len = 0
 
@@ -734,7 +734,7 @@ class WanAudioRunner(WanRunner):  # type:ignore
             self.cut_audio_final[self.segment.start_frame * self._audio_processor.audio_frame_rate : self.segment.end_frame * self._audio_processor.audio_frame_rate].copy_(audio_seg)
 
         # Update prev_video for next iteration
-        self.prev_video = self.gen_video[:, :, :useful_length].cpu()
+        self.prev_video = self.gen_video
         self.prev_latent = None
 
         del video_seg, audio_seg
@@ -871,7 +871,9 @@ class WanAudioRunner(WanRunner):  # type:ignore
     def _build_section_info(self) -> Optional[Dict[str, torch.Tensor]]:
         if self.prev_video is None:
             return None
-        prev_video = self.prev_video
+        # self.segment is last segment, so we need to get the last useful_length frames
+        useful_length = self.segment.end_frame - self.segment.start_frame
+        prev_video = self.prev_video[:, :, :useful_length]
         last_frames = prev_video[:, :, -self.prev_frame_length :].detach().cpu().clone()
         return {"prev_video": last_frames, "prev_latent": self.prev_latent}
 
