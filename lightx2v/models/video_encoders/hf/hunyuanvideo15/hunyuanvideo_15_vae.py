@@ -797,9 +797,7 @@ class HunyuanVideo15VAE:
     @torch.no_grad()
     def encode(self, x):
         if self.parallel and self.world_size_h is not None and self.world_size_w is not None:
-            res = self.encode_dist_2d(x, self.world_size_h, self.world_size_w)
-            print('encode_dist_2d!!')
-            return res
+            return self.encode_dist_2d(x, self.world_size_h, self.world_size_w)
         else:
             return self.vae.encode(x).latent_dist.mode() * self.vae.config.scaling_factor
 
@@ -808,7 +806,7 @@ class HunyuanVideo15VAE:
         cur_rank = dist.get_rank()
         cur_rank_h = cur_rank // world_size_w
         cur_rank_w = cur_rank % world_size_w
-        
+
         spatial_ratio = 16
 
         # Calculate chunk sizes for both dimensions
