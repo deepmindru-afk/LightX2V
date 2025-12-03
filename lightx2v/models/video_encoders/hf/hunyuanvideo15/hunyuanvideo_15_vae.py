@@ -796,7 +796,105 @@ class HunyuanVideo15VAE:
 
     @torch.no_grad()
     def encode(self, x):
-        return self.vae.encode(x).latent_dist.mode() * self.vae.config.scaling_factor
+        if self.parallel and self.world_size_h is not None and self.world_size_w is not None:
+            res = self.encode_dist_2d(x, self.world_size_h, self.world_size_w)
+            print('encode_dist_2d!!')
+            return res
+        else:
+            return self.vae.encode(x).latent_dist.mode() * self.vae.config.scaling_factor
+
+    @torch.no_grad()
+    def encode_dist_2d(self, video, world_size_h, world_size_w):
+        cur_rank = dist.get_rank()
+        cur_rank_h = cur_rank // world_size_w
+        cur_rank_w = cur_rank % world_size_w
+        
+        spatial_ratio = 16
+
+        # Calculate chunk sizes for both dimensions
+        total_latent_h = video.shape[3] // spatial_ratio
+        total_latent_w = video.shape[4] // spatial_ratio
+
+        chunk_h = total_latent_h // world_size_h
+        chunk_w = total_latent_w // world_size_w
+
+        padding_size = 1
+        video_chunk_h = chunk_h * spatial_ratio
+        video_chunk_w = chunk_w * spatial_ratio
+        video_padding_h = padding_size * spatial_ratio
+        video_padding_w = padding_size * spatial_ratio
+
+        # Calculate H dimension slice
+        if cur_rank_h == 0:
+            h_start = 0
+            h_end = video_chunk_h + 2 * video_padding_h
+        elif cur_rank_h == world_size_h - 1:
+            h_start = video.shape[3] - (video_chunk_h + 2 * video_padding_h)
+            h_end = video.shape[3]
+        else:
+            h_start = cur_rank_h * video_chunk_h - video_padding_h
+            h_end = (cur_rank_h + 1) * video_chunk_h + video_padding_h
+
+        # Calculate W dimension slice
+        if cur_rank_w == 0:
+            w_start = 0
+            w_end = video_chunk_w + 2 * video_padding_w
+        elif cur_rank_w == world_size_w - 1:
+            w_start = video.shape[4] - (video_chunk_w + 2 * video_padding_w)
+            w_end = video.shape[4]
+        else:
+            w_start = cur_rank_w * video_chunk_w - video_padding_w
+            w_end = (cur_rank_w + 1) * video_chunk_w + video_padding_w
+
+        # Extract the video chunk for this process
+        video_chunk = video[:, :, :, h_start:h_end, w_start:w_end].contiguous()
+
+        # Encode the chunk
+        encoded_chunk = self.vae.encode(video_chunk).latent_dist.mode() * self.vae.config.scaling_factor
+
+        # Remove padding from encoded chunk
+        if cur_rank_h == 0:
+            encoded_h_start = 0
+            encoded_h_end = chunk_h
+        elif cur_rank_h == world_size_h - 1:
+            encoded_h_start = encoded_chunk.shape[3] - chunk_h
+            encoded_h_end = encoded_chunk.shape[3]
+        else:
+            encoded_h_start = padding_size
+            encoded_h_end = encoded_chunk.shape[3] - padding_size
+
+        if cur_rank_w == 0:
+            encoded_w_start = 0
+            encoded_w_end = chunk_w
+        elif cur_rank_w == world_size_w - 1:
+            encoded_w_start = encoded_chunk.shape[4] - chunk_w
+            encoded_w_end = encoded_chunk.shape[4]
+        else:
+            encoded_w_start = padding_size
+            encoded_w_end = encoded_chunk.shape[4] - padding_size
+
+        encoded_chunk = encoded_chunk[:, :, :, encoded_h_start:encoded_h_end, encoded_w_start:encoded_w_end].contiguous()
+
+        # Gather all chunks
+        total_processes = world_size_h * world_size_w
+        full_encoded = [torch.empty_like(encoded_chunk) for _ in range(total_processes)]
+
+        dist.all_gather(full_encoded, encoded_chunk)
+
+        self.device_synchronize()
+
+        # Reconstruct the full encoded tensor
+        encoded_rows = []
+        for h_idx in range(world_size_h):
+            encoded_cols = []
+            for w_idx in range(world_size_w):
+                process_idx = h_idx * world_size_w + w_idx
+                encoded_cols.append(full_encoded[process_idx])
+            encoded_rows.append(torch.cat(encoded_cols, dim=4))
+
+        encoded = torch.cat(encoded_rows, dim=3)
+
+        return encoded
 
     @torch.no_grad()
     def decode(self, z):
